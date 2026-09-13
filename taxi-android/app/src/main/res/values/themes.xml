@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.TaxiApp" parent="Theme.MaterialComponents.DayNight">
+        <item name="colorPrimary">#0F1115</item>
+        <item name="colorPrimaryDark">#0F1115</item>
+        <item name="colorAccent">#FFCC33</item>
+        <item name="android:windowBackground">#0F1115</item>
+    </style>
+</resources>
