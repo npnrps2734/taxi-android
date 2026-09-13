@@ -18,7 +18,7 @@ import androidx.core.content.ContextCompat
 
 private const val PREFS_NAME = "taxi_prefs"
 private const val KEY_SERVER_URL = "server_url"
-private const val DEFAULT_URL = "http://[2a03:6f00:a::3:21d1]:3000"
+private const val DEFAULT_URL = "http://201.34.150.3:3000"
 private const val LOCATION_PERMISSION_REQUEST = 1001
 
 class MainActivity : AppCompatActivity() {
