@@ -4,8 +4,11 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.KeyEvent
+import android.view.View
 import android.webkit.GeolocationPermissions
 import android.webkit.WebChromeClient
 import android.webkit.WebView
@@ -20,7 +23,6 @@ private const val PREFS_NAME = "taxi_prefs"
 private const val KEY_SERVER_URL = "server_url"
 private const val DEFAULT_URL = "http://201.34.150.3:3000"
 private const val LOCATION_PERMISSION_REQUEST = 1001
-
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
@@ -29,6 +31,9 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тема запуска (Theme.TaxiApp.Splash, с логотипом UMKA) уже показана системой
+        // на самом старте; здесь сразу переключаемся на обычную тему приложения.
+        setTheme(R.style.Theme_TaxiApp)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
@@ -36,19 +41,26 @@ class MainActivity : AppCompatActivity() {
         // пока сама страница попробует определить местоположение. Так пользователь
         // видит системный диалог Android сразу при первом открытии приложения.
         requestLocationPermissionUpfront()
-        
+
         webView = findViewById(R.id.webView)
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
         webView.settings.setGeolocationEnabled(true)
         webView.settings.mediaPlaybackRequiresUserGesture = false
-
-        webView.webViewClient = object : WebViewClient() {}
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                hideSplashOverlay()
+            }
+        }
+        // На всякий случай прячем заставку и по таймауту — если страница долго
+        // не присылает событие завершения загрузки.
+        Handler(Looper.getMainLooper()).postDelayed({ hideSplashOverlay() }, 5000)
         webView.webChromeClient = object : WebChromeClient() {
             override fun onGeolocationPermissionsShowPrompt(
                 origin: String?,
                 callback: GeolocationPermissions.Callback?
-            ) {
+                    ) {
                 if (hasLocationPermission()) {
                     callback?.invoke(origin, true, false)
                 } else {
@@ -59,9 +71,9 @@ class MainActivity : AppCompatActivity() {
                         arrayOf(
                             Manifest.permission.ACCESS_FINE_LOCATION,
                             Manifest.permission.ACCESS_COARSE_LOCATION
-                        ),
+                            ),
                         LOCATION_PERMISSION_REQUEST
-                    )
+                        )
                 }
             }
         }
@@ -98,20 +110,20 @@ class MainActivity : AppCompatActivity() {
         input.setText(getServerUrl() ?: "")
 
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Адрес сервера такси-сервиса")
-            .setMessage("Укажите адрес вашего сервера (например, https://mytaxi.ru или http://IP-адрес:3000)")
-            .setView(input)
-            .setCancelable(!firstRun)
-            .setPositiveButton("Сохранить") { _, _ ->
-                var url = input.text.toString().trim()
-                if (url.isNotEmpty()) {
-                    if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                        url = "https://$url"
-                    }
-                    saveServerUrl(url)
-                    webView.loadUrl(url)
+        .setTitle("Адрес сервера такси-сервиса")
+        .setMessage("Укажите адрес вашего сервера (например, https://mytaxi.ru или http://IP-адрес:3000)")
+        .setView(input)
+        .setCancelable(!firstRun)
+        .setPositiveButton("Сохранить") { _, _ ->
+            var url = input.text.toString().trim()
+            if (url.isNotEmpty()) {
+                if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                    url = "https://$url"
                 }
+                saveServerUrl(url)
+                webView.loadUrl(url)
             }
+        }
 
         if (!firstRun) {
             dialog.setNegativeButton("Отмена", null)
@@ -120,16 +132,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getServerUrl(): String? =
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_SERVER_URL, null)
+    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_SERVER_URL, null)
 
     private fun saveServerUrl(url: String) {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(KEY_SERVER_URL, url).apply()
     }
 
-    private fun hasLocationPermission(): Boolean =
-        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
+    private fun hideSplashOverlay() {
+        findViewById<View>(R.id.splashOverlay)?.visibility = View.GONE
+    }
 
+    private fun hasLocationPermission(): Boolean =
+    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+    PackageManager.PERMISSION_GRANTED
     private fun requestLocationPermissionUpfront() {
         if (!hasLocationPermission()) {
             ActivityCompat.requestPermissions(
@@ -137,17 +152,17 @@ class MainActivity : AppCompatActivity() {
                 arrayOf(
                     Manifest.permission.ACCESS_FINE_LOCATION,
                     Manifest.permission.ACCESS_COARSE_LOCATION
-                ),
+                    ),
                 LOCATION_PERMISSION_REQUEST
-            )
+                )
         }
     }
-    
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
         grantResults: IntArray
-    ) {
+        ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == LOCATION_PERMISSION_REQUEST) {
             val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
