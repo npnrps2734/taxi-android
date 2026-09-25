@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "781750873516",
+    "project_id": "umka-2d008",
+    "storage_bucket": "umka-2d008.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:781750873516:android:4cdf42ec9f6f7a81c9de09",
+        "android_client_info": {
+          "package_name": "ru.taxiapp.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDgG1FJ4RPskAQZ6AldLKs5Ks9CLzySAhI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

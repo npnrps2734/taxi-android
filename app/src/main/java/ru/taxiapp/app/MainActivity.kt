@@ -3,31 +3,42 @@ package ru.taxiapp.app
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.text.InputType
 import android.view.KeyEvent
 import android.view.View
 import android.webkit.GeolocationPermissions
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.EditText
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.google.firebase.messaging.FirebaseMessaging
 
-private const val PREFS_NAME = "taxi_prefs"
-private const val KEY_SERVER_URL = "server_url"
-private const val DEFAULT_URL = "http://201.34.150.3:3000"
+// Адрес сервера зашит в приложении — пользователь его не меняет и не видит.
+private const val SERVER_URL = "https://umkatax.ru"
 private const val LOCATION_PERMISSION_REQUEST = 1001
+private const val NOTIFICATION_PERMISSION_REQUEST = 1002
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private var pendingGeoOrigin: String? = null
     private var pendingGeoCallback: GeolocationPermissions.Callback? = null
+    private var pageLoaded = false
+
+    companion object {
+        // Ссылка на текущую Activity — нужна FcmService, чтобы передать новый
+        // токен устройства прямо в открытую страницу (см. onNewToken).
+        // Обнуляется в onDestroy, чтобы не удерживать Activity в памяти дольше
+        // необходимого (простая защита от утечки).
+        var instance: MainActivity? = null
+        // Если токен обновился, пока страница ещё не дозагрузилась — сохраняем
+        // здесь и отправляем в WebView, как только onPageFinished сработает.
+        var pendingFcmToken: String? = null
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,11 +47,13 @@ class MainActivity : AppCompatActivity() {
         setTheme(R.style.Theme_TaxiApp)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        instance = this
 
         // Сразу при запуске приложения спрашиваем разрешение на GPS — не дожидаясь,
         // пока сама страница попробует определить местоположение. Так пользователь
         // видит системный диалог Android сразу при первом открытии приложения.
         requestLocationPermissionUpfront()
+        requestNotificationPermissionIfNeeded()
 
         webView = findViewById(R.id.webView)
         webView.settings.javaScriptEnabled = true
@@ -51,6 +64,8 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 hideSplashOverlay()
+                pageLoaded = true
+                pendingFcmToken?.let { deliverFcmTokenToWebView(it) }
             }
         }
         // На всякий случай прячем заставку и по таймауту — если страница долго
@@ -78,64 +93,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val savedUrl = getServerUrl()
-        if (savedUrl.isNullOrBlank()) {
-            // Сразу открываем ваш развёрнутый сервер — адрес можно сменить
-            // позже через меню (например, когда подключите домен).
-            saveServerUrl(DEFAULT_URL)
-            webView.loadUrl(DEFAULT_URL)
-        } else {
-            webView.loadUrl(savedUrl)
-        }
-    }
+        webView.loadUrl(SERVER_URL)
 
-    override fun onCreateOptionsMenu(menu: android.view.Menu?): Boolean {
-        menu?.add(0, 1, 0, "Изменить адрес сервера")
-        menu?.add(0, 2, 0, "Обновить")
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
-        when (item.itemId) {
-            1 -> promptForServerUrl(firstRun = false)
-            2 -> webView.reload()
-        }
-        return super.onOptionsItemSelected(item)
-    }
-
-    private fun promptForServerUrl(firstRun: Boolean) {
-        val input = EditText(this)
-        input.inputType = InputType.TYPE_TEXT_VARIATION_URI
-        input.hint = "https://ваш-домен.ru"
-        input.setText(getServerUrl() ?: "")
-
-        val dialog = AlertDialog.Builder(this)
-        .setTitle("Адрес сервера такси-сервиса")
-        .setMessage("Укажите адрес вашего сервера (например, https://mytaxi.ru или http://IP-адрес:3000)")
-        .setView(input)
-        .setCancelable(!firstRun)
-        .setPositiveButton("Сохранить") { _, _ ->
-            var url = input.text.toString().trim()
-            if (url.isNotEmpty()) {
-                if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                    url = "https://$url"
-                }
-                saveServerUrl(url)
-                webView.loadUrl(url)
-            }
-        }
-
-        if (!firstRun) {
-            dialog.setNegativeButton("Отмена", null)
-        }
-        dialog.show()
-    }
-
-    private fun getServerUrl(): String? =
-    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_SERVER_URL, null)
-
-    private fun saveServerUrl(url: String) {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(KEY_SERVER_URL, url).apply()
+        fetchFcmToken()
     }
 
     private fun hideSplashOverlay() {
@@ -158,6 +118,44 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // На Android 13+ показ уведомлений требует отдельного runtime-разрешения
+    // (POST_NOTIFICATIONS) — до 13-й версии уведомления разрешены по умолчанию.
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                ActivityCompat.requestPermissions(
+                    this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST
+                )
+            }
+        }
+    }
+
+    // Текущий токен устройства — может быть уже известен из прошлого запуска
+    // (Firebase кэширует его сам), а может понадобиться сгенерировать заново.
+    private fun fetchFcmToken() {
+        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+            if (task.isSuccessful) {
+                val token = task.result
+                pendingFcmToken = token
+                if (pageLoaded) deliverFcmTokenToWebView(token)
+            }
+        }
+    }
+
+    // Вызывает JS-функцию registerFcmToken (см. public/js/common.js в
+    // taxi-app) — она сама решает, отправлять ли токен на сервер (если
+    // пользователь ещё не вошёл в приложение — просто ничего не сделает).
+    fun deliverFcmTokenToWebView(token: String) {
+        val escaped = token.replace("\\", "\\\\").replace("'", "\\'")
+        webView.post {
+            webView.evaluateJavascript(
+                "if (window.registerFcmToken) { window.registerFcmToken('$escaped'); }", null
+            )
+        }
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -170,6 +168,9 @@ class MainActivity : AppCompatActivity() {
             pendingGeoOrigin = null
             pendingGeoCallback = null
         }
+        // NOTIFICATION_PERMISSION_REQUEST — намеренно без обработки результата:
+        // если пользователь откажет, приложение просто продолжит работать без
+        // push (как и раньше), запрашивать повторно молча не будем.
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -178,5 +179,10 @@ class MainActivity : AppCompatActivity() {
             return true
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (instance === this) instance = null
     }
 }
