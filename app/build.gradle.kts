@@ -45,5 +45,5 @@ dependencies {
     // всех firebase-библиотек между собой, конкретную версию messaging не
     // указываем отдельно.
     implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
-    implementation("com.google.firebase:firebase-messaging-ktx")
+    implementation("com.google.firebase:firebase-messaging")
 }
