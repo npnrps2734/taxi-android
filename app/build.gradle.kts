@@ -19,9 +19,30 @@ android {
         versionName = "1.0"
     }
 
+    // Подпись релизной сборки — ключ и пароли приходят из переменных
+    // окружения, которые задаёт GitHub Actions из репозиторных секретов (см.
+    // .github/workflows/build-android.yml и RELEASE_SIGNING.md). Если этих
+    // переменных нет (например, локальная сборка без секретов) —
+    // signingConfig релизу просто не назначается, и сборка не ломается, как
+    // и раньше, просто получится неподписанный APK.
+    val releaseStoreFile = System.getenv("RELEASE_STORE_FILE")
+    signingConfigs {
+        if (releaseStoreFile != null) {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseStoreFile != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
