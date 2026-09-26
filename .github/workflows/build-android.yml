@@ -1,3 +1,59 @@
 name: Build Android APK
-on: { push: { branches: [main, master] }, workflow_dispatch: {} }
-jobs: { build: { runs-on: ubuntu-latest, steps: [ { uses: actions/checkout@v4 }, { name: Set up JDK 17, uses: actions/setup-java@v4, with: { distribution: temurin, java-version: "17" } }, { name: Set up Gradle, uses: gradle/actions/setup-gradle@v4 }, { name: Build debug APK, run: gradle assembleDebug }, { name: Upload APK, uses: actions/upload-artifact@v4, with: { name: taxi-app-debug, path: app/build/outputs/apk/debug/app-debug.apk } } ] } }
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: gradle assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: taxi-app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      # Подписанная релизная сборка — нужна для публикации в RuStore (там не
+      # принимают debug-APK). Собирается, только если в секретах репозитория
+      # заведён ключ подписи (RELEASE_KEYSTORE_BASE64) — см. RELEASE_SIGNING.md.
+      # Если секреты не заданы, этот и следующий шаг просто пропускаются, и
+      # workflow всё равно успешно завершается с одним debug-APK, как раньше.
+      - name: Decode release keystore
+        if: ${{ env.HAS_RELEASE_SIGNING == 'true' }}
+        run: echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+
+      - name: Build release APK
+        if: ${{ env.HAS_RELEASE_SIGNING == 'true' }}
+        run: gradle assembleRelease
+        env:
+          RELEASE_STORE_FILE: ${{ runner.temp }}/release.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+
+      - name: Upload release APK
+        if: ${{ env.HAS_RELEASE_SIGNING == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: taxi-app-release
+          path: app/build/outputs/apk/release/app-release.apk
+    env:
+      HAS_RELEASE_SIGNING: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' }}
