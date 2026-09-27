@@ -25,8 +25,10 @@ import com.google.firebase.messaging.FirebaseMessaging
 
 // Адрес сервера зашит в приложении — пользователь его не меняет и не видит.
 private const val SERVER_URL = "https://umkatax.ru"
+// Запрос разрешений от самой веб-страницы (когда она просит геолокацию).
 private const val LOCATION_PERMISSION_REQUEST = 1001
-private const val NOTIFICATION_PERMISSION_REQUEST = 1002
+// Общий запрос всех нужных разрешений при старте приложения.
+private const val STARTUP_PERMISSION_REQUEST = 1003
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
@@ -54,11 +56,10 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         instance = this
 
-        // Сразу при запуске приложения спрашиваем разрешение на GPS — не дожидаясь,
+        // Сразу при запуске приложения спрашиваем разрешения — не дожидаясь,
         // пока сама страница попробует определить местоположение. Так пользователь
         // видит системный диалог Android сразу при первом открытии приложения.
-        requestLocationPermissionUpfront()
-        requestNotificationPermissionIfNeeded()
+        requestStartupPermissions()
 
         webView = findViewById(R.id.webView)
         webView.settings.javaScriptEnabled = true
@@ -172,30 +173,30 @@ class MainActivity : AppCompatActivity() {
     private fun hasLocationPermission(): Boolean =
     ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
     PackageManager.PERMISSION_GRANTED
-    private fun requestLocationPermissionUpfront() {
+    // Все стартовые разрешения запрашиваются ОДНИМ вызовом.
+    //
+    // Раньше геолокация и уведомления запрашивались двумя вызовами подряд, и
+    // это не работало: Android показывает только один диалог разрешений за
+    // раз, а второй запрос, отправленный пока первый ещё не закрыт, просто
+    // игнорируется — до уведомлений дело не доходило. Если передать все
+    // разрешения одним массивом, система сама покажет диалоги по очереди.
+    //
+    // POST_NOTIFICATIONS появилось только в Android 13; на более старых
+    // версиях уведомления разрешены по умолчанию и запрашивать нечего.
+    private fun requestStartupPermissions() {
+        val needed = mutableListOf<String>()
         if (!hasLocationPermission()) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                    ),
-                LOCATION_PERMISSION_REQUEST
-                )
+            needed += Manifest.permission.ACCESS_FINE_LOCATION
+            needed += Manifest.permission.ACCESS_COARSE_LOCATION
         }
-    }
-
-    // На Android 13+ показ уведомлений требует отдельного runtime-разрешения
-    // (POST_NOTIFICATIONS) — до 13-й версии уведомления разрешены по умолчанию.
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
-                PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                ActivityCompat.requestPermissions(
-                    this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST
-                )
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            needed += Manifest.permission.POST_NOTIFICATIONS
+        }
+        if (needed.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, needed.toTypedArray(), STARTUP_PERMISSION_REQUEST)
         }
     }
 
@@ -229,15 +230,20 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
         ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == LOCATION_PERMISSION_REQUEST) {
-            val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
-            pendingGeoCallback?.invoke(pendingGeoOrigin, granted, false)
-            pendingGeoOrigin = null
-            pendingGeoCallback = null
+        if (requestCode == LOCATION_PERMISSION_REQUEST || requestCode == STARTUP_PERMISSION_REQUEST) {
+            // В стартовом запросе разрешений несколько, поэтому ответ именно
+            // по геолокации ищем по имени, а не по первому элементу массива.
+            val locationIndex = permissions.indexOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            if (locationIndex >= 0 && locationIndex < grantResults.size) {
+                val granted = grantResults[locationIndex] == PackageManager.PERMISSION_GRANTED
+                pendingGeoCallback?.invoke(pendingGeoOrigin, granted, false)
+                pendingGeoOrigin = null
+                pendingGeoCallback = null
+            }
         }
-        // NOTIFICATION_PERMISSION_REQUEST — намеренно без обработки результата:
-        // если пользователь откажет, приложение просто продолжит работать без
-        // push (как и раньше), запрашивать повторно молча не будем.
+        // Результат по уведомлениям намеренно не обрабатываем: если
+        // пользователь откажет, приложение просто продолжит работать без push
+        // (как и раньше), молча переспрашивать не будем.
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
