@@ -2,7 +2,10 @@ package ru.taxiapp.app
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -11,8 +14,10 @@ import android.view.KeyEvent
 import android.view.View
 import android.webkit.GeolocationPermissions
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -67,6 +72,22 @@ class MainActivity : AppCompatActivity() {
                 pageLoaded = true
                 pendingFcmToken?.let { deliverFcmTokenToWebView(it) }
             }
+
+            // Оплата через СБП: ЮKassa уводит не на веб-страницу, а на ссылку
+            // вида bank100000000004://qr.nspk.ru/... — это команда "открой
+            // приложение банка". WebView такие схемы не понимает и показывает
+            // ERR_UNKNOWN_URL_SCHEME, поэтому перехватываем их сами и отдаём
+            // системе, чтобы она запустила нужное приложение.
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val url = request?.url?.toString() ?: return false
+                return openExternalAppIfNeeded(url)
+            }
+
+            // Устаревший вариант метода — некоторые прошивки всё ещё вызывают его.
+            @Suppress("DEPRECATION")
+            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                return openExternalAppIfNeeded(url ?: return false)
+            }
         }
         // На всякий случай прячем заставку и по таймауту — если страница долго
         // не присылает событие завершения загрузки.
@@ -96,6 +117,52 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl(SERVER_URL)
 
         fetchFcmToken()
+    }
+
+    // Возвращает true, если ссылку обработали снаружи (WebView её грузить не
+    // должен), и false для обычных http/https-страниц, которые открываются
+    // внутри приложения как раньше.
+    private fun openExternalAppIfNeeded(url: String): Boolean {
+        val scheme = Uri.parse(url).scheme?.lowercase() ?: return false
+        // Обычные страницы — как и раньше, внутри приложения.
+        if (scheme == "http" || scheme == "https") return false
+        // Эти схемы наружу не отдаём: file:// открыл бы доступ к файлам
+        // устройства, javascript: исполнился бы в контексте страницы.
+        if (scheme == "file" || scheme == "javascript" || scheme == "about" || scheme == "data") return true
+
+        val intent = try {
+            if (scheme == "intent") {
+                Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+            } else {
+                Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            }
+        } catch (e: Exception) {
+            null
+        } ?: run {
+            Toast.makeText(this, "Не удалось открыть ссылку", Toast.LENGTH_SHORT).show()
+            return true
+        }
+
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            startActivity(intent)
+            true
+        } catch (e: ActivityNotFoundException) {
+            // Приложения банка на устройстве нет. У intent://-ссылок обычно
+            // есть запасной веб-адрес — открываем его; иначе объясняем, что
+            // произошло, вместо непонятной ошибки WebView.
+            val fallback = intent.getStringExtra("browser_fallback_url")
+            if (fallback != null) {
+                webView.loadUrl(fallback)
+            } else {
+                Toast.makeText(
+                    this,
+                    "Нужное приложение банка не установлено. Попробуйте оплатить картой.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            true
+        }
     }
 
     private fun hideSplashOverlay() {
