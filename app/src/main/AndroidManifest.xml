@@ -26,6 +26,17 @@
             </intent-filter>
         </activity>
 
+        <!-- Снимок с камеры для загрузки фото на страницах (см. MainActivity.onShowFileChooser) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- Push-уведомления (Firebase Cloud Messaging) — см. FcmService.kt -->
         <service
             android:name=".FcmService"
