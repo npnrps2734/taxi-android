@@ -10,6 +10,12 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient.FileChooserParams
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import java.io.File
 import android.view.KeyEvent
 import android.view.View
 import android.webkit.GeolocationPermissions
@@ -35,6 +41,52 @@ class MainActivity : AppCompatActivity() {
     private var pendingGeoOrigin: String? = null
     private var pendingGeoCallback: GeolocationPermissions.Callback? = null
     private var pageLoaded = false
+
+    // ---- Выбор файла/фото для <input type="file"> на страницах ----
+    // Без onShowFileChooser WebView молча игнорирует нажатие на «Прикрепить фото».
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var cameraPhotoUri: Uri? = null
+
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val cb = filePathCallback
+            filePathCallback = null
+            if (cb == null) return@registerForActivityResult
+            var uris: Array<Uri>? = null
+            if (result.resultCode == RESULT_OK) {
+                val data = result.data
+                val picked = FileChooserParams.parseResult(result.resultCode, data)
+                uris = when {
+                    picked != null && picked.isNotEmpty() -> picked
+                    // Снимок с камеры: система кладёт его в наш uri и ничего не возвращает в data.
+                    cameraPhotoUri != null -> arrayOf(cameraPhotoUri!!)
+                    else -> null
+                }
+            }
+            cb.onReceiveValue(uris)
+            cameraPhotoUri = null
+        }
+
+    // Intent камеры, который пишет снимок в наш временный файл (FileProvider).
+    private fun buildCameraIntent(front: Boolean): Intent? {
+        return try {
+            val dir = File(cacheDir, "camera").apply { mkdirs() }
+            val file = File.createTempFile("photo_", ".jpg", dir)
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            cameraPhotoUri = uri
+            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (front) {
+                intent.putExtra("android.intent.extras.CAMERA_FACING", 1)
+                intent.putExtra("android.intent.extras.LENS_FACING_FRONT", 1)
+                intent.putExtra("android.intent.extra.USE_FRONT_CAMERA", true)
+            }
+            if (intent.resolveActivity(packageManager) != null) intent else null
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     companion object {
         // Ссылка на текущую Activity — нужна FcmService, чтобы передать новый
@@ -94,6 +146,42 @@ class MainActivity : AppCompatActivity() {
         // не присылает событие завершения загрузки.
         Handler(Looper.getMainLooper()).postDelayed({ hideSplashOverlay() }, 5000)
         webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                view: WebView?,
+                callback: ValueCallback<Array<Uri>>?,
+                params: FileChooserParams?
+            ): Boolean {
+                // Если предыдущий выбор не завершён — отменяем, иначе WebView зависнет.
+                filePathCallback?.onReceiveValue(null)
+                filePathCallback = callback
+                cameraPhotoUri = null
+                val wantsCamera = params?.isCaptureEnabled == true
+                val intent: Intent
+                if (wantsCamera) {
+                    // Селфи: сразу открываем фронтальную камеру.
+                    val cam = buildCameraIntent(true)
+                    intent = cam ?: params!!.createIntent()
+                } else {
+                    val gallery = try { params?.createIntent() } catch (e: Exception) { null }
+                        ?: Intent(Intent.ACTION_GET_CONTENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "image/*" }
+                    val chooser = Intent(Intent.ACTION_CHOOSER)
+                    chooser.putExtra(Intent.EXTRA_INTENT, gallery)
+                    chooser.putExtra(Intent.EXTRA_TITLE, "Выберите фото")
+                    val cam = buildCameraIntent(false)
+                    if (cam != null) chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cam))
+                    intent = chooser
+                }
+                return try {
+                    fileChooserLauncher.launch(intent)
+                    true
+                } catch (e: Exception) {
+                    filePathCallback = null
+                    callback?.onReceiveValue(null)
+                    Toast.makeText(this@MainActivity, "Не удалось открыть выбор фото", Toast.LENGTH_SHORT).show()
+                    true
+                }
+            }
+
             override fun onGeolocationPermissionsShowPrompt(
                 origin: String?,
                 callback: GeolocationPermissions.Callback?
