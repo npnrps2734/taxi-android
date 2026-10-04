@@ -6,6 +6,10 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <!-- Показ push-уведомлений на Android 13+ (см. MainActivity: requestNotificationPermissionIfNeeded) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- «Позвонить» водителю/пассажиру из приложения (запрашивается при первом нажатии; при отказе открывается набор номера) -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <!-- Телефон не обязателен: приложение можно поставить и на планшет без звонков -->
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
     <application
         android:allowBackup="true"
