@@ -10,7 +10,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.ContactsContract
 import android.provider.MediaStore
+import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient.FileChooserParams
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,6 +37,8 @@ private const val SERVER_URL = "https://umkatax.ru"
 private const val LOCATION_PERMISSION_REQUEST = 1001
 // Общий запрос всех нужных разрешений при старте приложения.
 private const val STARTUP_PERMISSION_REQUEST = 1003
+// Запрос разрешения на звонки (при первом нажатии «Позвонить»).
+private const val CALL_PERMISSION_REQUEST = 1004
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
@@ -88,6 +92,136 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---- Мост для сайта: звонок, «Поделиться», выбор контакта, SMS (window.UmkaApp в JS) ----
+    private var pendingCallNumber: String? = null
+
+    // Выбор контакта из телефонной книги. Через системный выбор (ACTION_PICK) разрешение на
+    // чтение всех контактов не нужно: приложение получает только тот номер, который выбрал пользователь.
+    private val contactPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            var name = ""
+            var phone = ""
+            val uri = result.data?.data
+            if (result.resultCode == RESULT_OK && uri != null) {
+                try {
+                    contentResolver.query(
+                        uri,
+                        arrayOf(
+                            ContactsContract.CommonDataKinds.Phone.NUMBER,
+                            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                        ),
+                        null, null, null
+                    )?.use { c ->
+                        if (c.moveToFirst()) {
+                            phone = c.getString(0) ?: ""
+                            name = c.getString(1) ?: ""
+                        }
+                    }
+                } catch (e: Exception) { /* оставим пустым — страница покажет подсказку */ }
+            }
+            deliverContactToWebView(name, phone)
+        }
+
+    private fun jsEscape(v: String): String =
+        v.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ").replace("\r", " ")
+
+    private fun deliverContactToWebView(name: String, phone: String) {
+        webView.post {
+            webView.evaluateJavascript(
+                "if (window.onContactPicked) { window.onContactPicked('${jsEscape(name)}', '${jsEscape(phone)}'); }", null
+            )
+        }
+    }
+
+    // Только наш сайт может пользоваться мостом (а не, например, страница оплаты банка).
+    private fun isTrustedPage(): Boolean {
+        val host = Uri.parse(webView.url ?: return false).host ?: return false
+        return host == Uri.parse(SERVER_URL).host
+    }
+
+    private fun normalizePhone(raw: String): String? {
+        val n = raw.replace(Regex("[^0-9+]"), "")
+        return if (n.length in 3..16) n else null
+    }
+
+    // Звонок: если разрешение на звонки уже выдано — набираем сразу; нет — просим разрешение,
+    // а при отказе открываем обычный набор номера (звонок всё равно будет в один тап).
+    private fun placeCall(raw: String) {
+        val number = normalizePhone(raw) ?: return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
+            startCall(number, true)
+        } else {
+            pendingCallNumber = number
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CALL_PHONE), CALL_PERMISSION_REQUEST)
+        }
+    }
+
+    private fun startCall(number: String, direct: Boolean) {
+        val action = if (direct) Intent.ACTION_CALL else Intent.ACTION_DIAL
+        try {
+            startActivity(Intent(action, Uri.parse("tel:$number")))
+        } catch (e: SecurityException) {
+            startCall(number, false)
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, "На устройстве нет приложения для звонков", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    inner class UmkaBridge {
+        @JavascriptInterface
+        fun call(phone: String) {
+            runOnUiThread { if (isTrustedPage()) placeCall(phone) }
+        }
+
+        @JavascriptInterface
+        fun share(text: String, title: String) {
+            runOnUiThread {
+                if (!isTrustedPage()) return@runOnUiThread
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, text)
+                    if (title.isNotBlank()) putExtra(Intent.EXTRA_SUBJECT, title)
+                }
+                try {
+                    startActivity(Intent.createChooser(send, "Отправить приглашение"))
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Не удалось открыть меню отправки", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun pickContact() {
+            runOnUiThread {
+                if (!isTrustedPage()) return@runOnUiThread
+                try {
+                    contactPickerLauncher.launch(
+                        Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI)
+                    )
+                } catch (e: Exception) {
+                    deliverContactToWebView("", "")
+                }
+            }
+        }
+
+        // SMS открывается как черновик в приложении сообщений — отправляет сам пользователь.
+        @JavascriptInterface
+        fun sendSms(phone: String, text: String) {
+            runOnUiThread {
+                if (!isTrustedPage()) return@runOnUiThread
+                val number = normalizePhone(phone) ?: return@runOnUiThread
+                val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$number")).apply {
+                    putExtra("sms_body", text)
+                }
+                try {
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Не удалось открыть сообщения", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     companion object {
         // Ссылка на текущую Activity — нужна FcmService, чтобы передать новый
         // токен устройства прямо в открытую страницу (см. onNewToken).
@@ -118,6 +252,7 @@ class MainActivity : AppCompatActivity() {
         webView.settings.domStorageEnabled = true
         webView.settings.setGeolocationEnabled(true)
         webView.settings.mediaPlaybackRequiresUserGesture = false
+        webView.addJavascriptInterface(UmkaBridge(), "UmkaApp")
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
@@ -318,6 +453,14 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
         ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == CALL_PERMISSION_REQUEST) {
+            val number = pendingCallNumber
+            pendingCallNumber = null
+            if (number != null) {
+                val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                startCall(number, granted)
+            }
+        }
         if (requestCode == LOCATION_PERMISSION_REQUEST || requestCode == STARTUP_PERMISSION_REQUEST) {
             // В стартовом запросе разрешений несколько, поэтому ответ именно
             // по геолокации ищем по имени, а не по первому элементу массива.
