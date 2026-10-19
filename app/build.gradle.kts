@@ -15,8 +15,8 @@ android {
         applicationId = "ru.taxiapp.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     // Подпись релизной сборки — ключ и пароли приходят из переменных
@@ -67,4 +67,7 @@ dependencies {
     // указываем отдельно.
     implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
     implementation("com.google.firebase:firebase-messaging")
+
+    // Push-уведомления через RuStore (для телефонов с приложением из RuStore, без Google)
+    implementation("ru.rustore.sdk:pushclient:7.3.0")
 }

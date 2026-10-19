@@ -3,6 +3,10 @@ package ru.taxiapp.app
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
+import android.app.AlertDialog
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -10,6 +14,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.webkit.JavascriptInterface
@@ -18,11 +24,16 @@ import android.webkit.WebChromeClient.FileChooserParams
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
 import android.view.KeyEvent
 import android.view.View
 import android.webkit.GeolocationPermissions
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
@@ -30,6 +41,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.FirebaseMessaging
+import ru.rustore.sdk.pushclient.RuStorePushClient
 
 // Адрес сервера зашит в приложении — пользователь его не меняет и не видит.
 private const val SERVER_URL = "https://umkatax.ru"
@@ -39,12 +51,23 @@ private const val LOCATION_PERMISSION_REQUEST = 1001
 private const val STARTUP_PERMISSION_REQUEST = 1003
 // Запрос разрешения на звонки (при первом нажатии «Позвонить»).
 private const val CALL_PERMISSION_REQUEST = 1004
+// Своя страница «сервис недоступен» (лежит в assets) и таймаут загрузки основной страницы.
+private const val OFFLINE_PAGE = "file:///android_asset/offline.html"
+private const val LOAD_TIMEOUT_MS = 30_000L
+private const val ERROR_UNSUPPORTED_SCHEME_CODE = -10
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private var pendingGeoOrigin: String? = null
     private var pendingGeoCallback: GeolocationPermissions.Callback? = null
     private var pageLoaded = false
+
+    // ---- Экран «сервис недоступен» ----
+    // Если сервер не отвечает, WebView показывает белую страницу или системную ошибку.
+    // Вместо этого открываем свою страницу из assets/offline.html с кнопкой «Повторить».
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val loadTimeoutRunnable = Runnable { onLoadTimeout() }
+    private var lastMainUrl: String? = null
 
     // ---- Выбор файла/фото для <input type="file"> на страницах ----
     // Без onShowFileChooser WebView молча игнорирует нажатие на «Прикрепить фото».
@@ -167,7 +190,72 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---- Работа в фоне: пока водитель на линии, держим службу переднего плана (DriverService) ----
+    private var lineActive = false
+
+    // Один раз просим «не ограничивать» приложение по батарее — без этого часть прошивок
+    // (Xiaomi, Huawei, Honor, Realme и др.) всё равно усыпляет приложение в фоне.
+    private fun askIgnoreBatteryOptimizationsOnce() {
+        val prefs = getSharedPreferences("umka", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("battery_asked", false)) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        prefs.edit().putBoolean("battery_asked", true).apply()
+        openBatterySettings()
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun openBatterySettings() {
+        try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+            )
+        } catch (e: Exception) {
+            try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (e2: Exception) { /* нет такого экрана */ }
+        }
+    }
+
     inner class UmkaBridge {
+        // Страница водителя сообщает: вышел на линию (true) / ушёл с линии (false).
+        @JavascriptInterface
+        fun setOnLine(on: Boolean) {
+            runOnUiThread {
+                if (!isTrustedPage()) return@runOnUiThread
+                lineActive = on
+                if (on) {
+                    DriverService.start(this@MainActivity)
+                    askIgnoreBatteryOptimizationsOnce()
+                } else {
+                    DriverService.stop(this@MainActivity)
+                }
+            }
+        }
+
+        // Ключ входа водителя — для отправки GPS из службы, когда приложение свёрнуто.
+        @JavascriptInterface
+        fun setAuth(token: String) {
+            if (!isTrustedPage()) return
+            DriverService.baseUrl = SERVER_URL
+            DriverService.authToken = token
+        }
+
+        // Кнопка «Выйти из приложения» (Назад на главном экране → «Выйти»): полностью закрываем приложение.
+        @JavascriptInterface
+        fun exitApp() {
+            runOnUiThread {
+                if (!isTrustedPage()) return@runOnUiThread
+                lineActive = false
+                DriverService.stop(this@MainActivity)
+                finishAffinity()
+            }
+        }
+
+        // Экран настройки батареи — для подсказки водителю в настройках приложения.
+        @JavascriptInterface
+        fun openBatterySettings() {
+            runOnUiThread { if (isTrustedPage()) this@MainActivity.openBatterySettings() }
+        }
+
         @JavascriptInterface
         fun call(phone: String) {
             runOnUiThread { if (isTrustedPage()) placeCall(phone) }
@@ -231,6 +319,10 @@ class MainActivity : AppCompatActivity() {
         // Если токен обновился, пока страница ещё не дозагрузилась — сохраняем
         // здесь и отправляем в WebView, как только onPageFinished сработает.
         var pendingFcmToken: String? = null
+        // То же для RuStore Push.
+        var pendingRustoreToken: String? = null
+        // Приложение сейчас на экране (между onStart и onStop) — нужно службе GPS, чтобы не дублировать страницу.
+        @Volatile var appVisible = false
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -246,6 +338,7 @@ class MainActivity : AppCompatActivity() {
         // пока сама страница попробует определить местоположение. Так пользователь
         // видит системный диалог Android сразу при первом открытии приложения.
         requestStartupPermissions()
+        ensureNotificationChannel()
 
         webView = findViewById(R.id.webView)
         webView.settings.javaScriptEnabled = true
@@ -254,11 +347,41 @@ class MainActivity : AppCompatActivity() {
         webView.settings.mediaPlaybackRequiresUserGesture = false
         webView.addJavascriptInterface(UmkaBridge(), "UmkaApp")
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                if (url != null && !isOfflineUrl(url)) {
+                    lastMainUrl = url
+                    // Если страница не загрузилась за 30 секунд — сервер, скорее всего, недоступен.
+                    mainHandler.removeCallbacks(loadTimeoutRunnable)
+                    mainHandler.postDelayed(loadTimeoutRunnable, LOAD_TIMEOUT_MS)
+                }
+            }
+
+            // Ошибка загрузки ОСНОВНОЙ страницы (нет сети, сервер не отвечает, обрыв TLS и т.п.).
+            // Ошибки отдельных картинок и скриптов игнорируем — иначе экран ошибки вылезал бы зря.
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                super.onReceivedError(view, request, error)
+                if (request?.isForMainFrame != true) return
+                // ERROR_UNSUPPORTED_SCHEME (-10): ссылки банков и т.п. обрабатываются отдельно.
+                if (error?.errorCode == ERROR_UNSUPPORTED_SCHEME_CODE) return
+                showOfflinePage(request?.url?.toString())
+            }
+
+            // Сервер ответил, но с ошибкой 5xx (502/503/504 — приложение упало или перегружено).
+            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                if (request?.isForMainFrame != true) return
+                val code = errorResponse?.statusCode ?: return
+                if (code in 500..599) showOfflinePage(request?.url?.toString())
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                mainHandler.removeCallbacks(loadTimeoutRunnable)
                 hideSplashOverlay()
                 pageLoaded = true
                 pendingFcmToken?.let { deliverFcmTokenToWebView(it) }
+                pendingRustoreToken?.let { deliverRustoreTokenToWebView(it) }
             }
 
             // Оплата через СБП: ЮKassa уводит не на веб-страницу, а на ссылку
@@ -341,6 +464,63 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl(SERVER_URL)
 
         fetchFcmToken()
+        fetchRustoreToken()
+        checkForUpdate()
+    }
+
+    // Канал уведомлений создаём заранее: когда приложение свёрнуто, push показывает сама система Firebase
+    // и использует канал из манифеста (default_notification_channel_id). Если канала нет, он создаётся
+    // «тихим», и заказ приходит без звука и всплывающей плашки.
+    private fun ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (nm.getNotificationChannel("umka_default") != null) return
+        val ch = NotificationChannel("umka_default", "Уведомления UMKA Такси", NotificationManager.IMPORTANCE_HIGH)
+        ch.description = "Новые заказы, статусы поездок, сообщения"
+        ch.enableVibration(true)
+        ch.lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+        nm.createNotificationChannel(ch)
+    }
+
+    // ---- Проверка новой версии приложения ----
+    // Сервер отдаёт номер последней версии (GET /api/app/android-version). Если он больше номера
+    // установленной — раз в сутки предлагаем обновиться. Ошибки сети молча игнорируем.
+    private fun installedVersionCode(): Long = try {
+        val info = packageManager.getPackageInfo(packageName, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
+    } catch (e: Exception) { Long.MAX_VALUE }
+
+    private fun checkForUpdate() {
+        val prefs = getSharedPreferences("umka", Context.MODE_PRIVATE)
+        if (System.currentTimeMillis() - prefs.getLong("update_asked_at", 0L) < 24L * 60 * 60 * 1000) return
+        Thread {
+            try {
+                val c = URL("$SERVER_URL/api/app/android-version").openConnection() as HttpURLConnection
+                c.connectTimeout = 6000
+                c.readTimeout = 6000
+                val body = c.inputStream.bufferedReader().use { it.readText() }
+                c.disconnect()
+                val json = JSONObject(body)
+                val latest = json.optLong("latestVersionCode", 0L)
+                val url = json.optString("url", "")
+                if (latest > installedVersionCode() && url.startsWith("https://")) {
+                    runOnUiThread { if (!isFinishing && !isDestroyed) showUpdateDialog(url) }
+                }
+            } catch (e: Exception) { /* нет сети или сервер недоступен — не страшно */ }
+        }.start()
+    }
+
+    private fun showUpdateDialog(url: String) {
+        getSharedPreferences("umka", Context.MODE_PRIVATE).edit()
+            .putLong("update_asked_at", System.currentTimeMillis()).apply()
+        AlertDialog.Builder(this)
+            .setTitle("Доступно обновление")
+            .setMessage("Вышла новая версия приложения UMKA. Обновите её, чтобы всё работало правильно.")
+            .setPositiveButton("Обновить") { _, _ ->
+                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (e: Exception) { /* нет браузера */ }
+            }
+            .setNegativeButton("Позже", null)
+            .show()
     }
 
     // Возвращает true, если ссылку обработали снаружи (WebView её грузить не
@@ -348,8 +528,21 @@ class MainActivity : AppCompatActivity() {
     // внутри приложения как раньше.
     private fun openExternalAppIfNeeded(url: String): Boolean {
         val scheme = Uri.parse(url).scheme?.lowercase() ?: return false
-        // Обычные страницы — как и раньше, внутри приложения.
-        if (scheme == "http" || scheme == "https") return false
+        // Ссылки на MAX (чат-бот UMKA с экрана «сервис недоступен») открываем в самом мессенджере MAX,
+        // а если его нет — в браузере; внутри приложения они не нужны.
+        if (scheme == "http" || scheme == "https") {
+            val host = Uri.parse(url).host?.lowercase() ?: ""
+            if (host == "max.ru" || host.endsWith(".max.ru")) {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Не удалось открыть MAX", Toast.LENGTH_SHORT).show()
+                }
+                return true
+            }
+            // Обычные страницы — как и раньше, внутри приложения.
+            return false
+        }
         // Эти схемы наружу не отдаём: file:// открыл бы доступ к файлам
         // устройства, javascript: исполнился бы в контексте страницы.
         if (scheme == "file" || scheme == "javascript" || scheme == "about" || scheme == "data") return true
@@ -387,6 +580,25 @@ class MainActivity : AppCompatActivity() {
             }
             true
         }
+    }
+
+    private fun isOfflineUrl(url: String?): Boolean =
+        url != null && url.startsWith(OFFLINE_PAGE)
+
+    private fun onLoadTimeout() {
+        // Таймаут срабатывает только если страница так и не загрузилась.
+        if (isOfflineUrl(webView.url)) return
+        if (webView.progress >= 100) return
+        showOfflinePage(lastMainUrl ?: webView.url)
+    }
+
+    private fun showOfflinePage(failedUrl: String?) {
+        mainHandler.removeCallbacks(loadTimeoutRunnable)
+        if (isOfflineUrl(webView.url)) return
+        val target = failedUrl?.takeIf { it.startsWith(SERVER_URL) } ?: SERVER_URL
+        webView.stopLoading()
+        webView.loadUrl(OFFLINE_PAGE + "?u=" + Uri.encode(target))
+        hideSplashOverlay()
     }
 
     private fun hideSplashOverlay() {
@@ -447,6 +659,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Токен RuStore Push. Если на телефоне нет приложения RuStore или оно не может выдать токен —
+    // тихо пропускаем, останется Google-push (FCM).
+    private fun fetchRustoreToken() {
+        try {
+            RuStorePushClient.getToken()
+                .addOnSuccessListener { token ->
+                    pendingRustoreToken = token
+                    if (pageLoaded) deliverRustoreTokenToWebView(token)
+                }
+                .addOnFailureListener { /* RuStore недоступен — не страшно */ }
+        } catch (e: Exception) { /* SDK не инициализирован — пропускаем */ }
+    }
+
+    // Вызывает JS-функцию registerRustoreToken (см. public/js/common.js).
+    fun deliverRustoreTokenToWebView(token: String) {
+        val escaped = token.replace("\\", "\\\\").replace("'", "\\'")
+        webView.post {
+            webView.evaluateJavascript(
+                "if (window.registerRustoreToken) { window.registerRustoreToken('$escaped'); }", null
+            )
+        }
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -478,6 +713,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // С экрана «сервис недоступен» кнопка «назад» закрывает приложение, а не возвращает
+        // на ту же недоступную страницу.
+        if (keyCode == KeyEvent.KEYCODE_BACK && isOfflineUrl(webView.url)) {
+            return super.onKeyDown(keyCode, event)
+        }
         if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
             webView.goBack()
             return true
@@ -485,7 +725,26 @@ class MainActivity : AppCompatActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    // Приложение свернули: пока водитель на линии, не даём странице «заснуть» —
+    // иначе замирают таймеры и сокет, и заказы перестают приходить.
+    override fun onStart() {
+        super.onStart()
+        appVisible = true
+    }
+
+    override fun onStop() {
+        super.onStop()
+        appVisible = false
+        if (lineActive) {
+            webView.onResume()
+            webView.resumeTimers()
+        }
+    }
+
     override fun onDestroy() {
+        mainHandler.removeCallbacks(loadTimeoutRunnable)
+        // Приложение закрыто совсем (а не пересоздано системой) — служба «на линии» не нужна.
+        if (isFinishing) DriverService.stop(this)
         super.onDestroy()
         if (instance === this) instance = null
     }
