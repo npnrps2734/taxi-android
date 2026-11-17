@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Приложение водителя «UMKA Водитель»: дополнительно к общему манифесту (src/main) —
+     работа в фоне, пока водитель на линии. Пассажирскому приложению эти разрешения не нужны. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Служба переднего плана с геолокацией (DriverService) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Просьба «не ограничивать работу приложения в фоне» (один раз при первом выходе на линию) -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <application>
+        <!-- Служба «Вы на линии»: держит приложение живым в фоне -->
+        <service
+            android:name=".DriverService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <!-- ID проекта RuStore Push для приложения водителя ещё не указан (gradle.properties →
+             RUSTORE_DRIVER_PROJECT_ID) — без него не подключаем RuStore Push, уведомления идут через Google -->
+        <meta-data
+            android:name="ru.rustore.sdk.pushclient.project_id"
+            tools:node="remove" />
+    </application>
+</manifest>

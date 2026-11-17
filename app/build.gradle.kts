@@ -7,16 +7,65 @@ plugins {
     id("com.google.gms.google-services")
 }
 
+// ID проекта RuStore Push для «UMKA Водитель» (RuStore Консоль → приложение водителя →
+// Push-уведомления → Проекты). Не секрет — так же, как ID пассажирского проекта в манифесте.
+val driverRustoreProjectId: String = (project.findProperty("RUSTORE_DRIVER_PROJECT_ID") as String?)?.trim() ?: ""
+
+// Google-push (Firebase) для «UMKA Водитель» включается, когда в app/google-services.json
+// появится приложение ru.taxiapp.driver (Firebase Console → Добавить приложение → Android).
+// До этого сборка не падает: обработка google-services для водителя просто пропускается,
+// а уведомления водителю идут через RuStore Push.
+val firebaseHasDriver: Boolean = file("google-services.json").let { it.exists() && it.readText().contains("\"ru.taxiapp.driver\"") }
+tasks.configureEach {
+    if (!firebaseHasDriver && name.startsWith("process") && name.contains("Driver") && name.endsWith("GoogleServices")) enabled = false
+}
+
 android {
     namespace = "ru.taxiapp.app"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "ru.taxiapp.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    // Два приложения из одного кода:
+    //   passenger — «UMKA Такси» для пассажиров (тот же пакет ru.taxiapp.app, что уже в RuStore —
+    //               у пассажиров оно просто обновится);
+    //   driver    — «UMKA Водитель» (новый пакет ru.taxiapp.driver): работа в фоне на линии,
+    //               своя иконка с подписью «ВОДИТЕЛЬ».
+    // Какое из них запущено, страница узнаёт через UmkaApp.appKind() (см. MainActivity).
+    flavorDimensions += "app"
+    productFlavors {
+        create("passenger") {
+            dimension = "app"
+            applicationId = "ru.taxiapp.app"
+            versionCode = 4
+            versionName = "1.3"
+            resValue("string", "app_name", "UMKA Такси")
+            buildConfigField("String", "APP_KIND", "\"passenger\"")
+            manifestPlaceholders["rustoreProjectId"] = "b0p3XL0lkDtR9gG3CpXBc3ohQavojb0W"
+        }
+        create("driver") {
+            dimension = "app"
+            applicationId = "ru.taxiapp.driver"
+            versionCode = 1
+            versionName = "1.0"
+            resValue("string", "app_name", "UMKA Водитель")
+            buildConfigField("String", "APP_KIND", "\"driver\"")
+            // ID проекта RuStore Push приложения водителя — gradle.properties (RUSTORE_DRIVER_PROJECT_ID).
+            // Пока пусто — RuStore Push в приложении водителя не подключается (см. sourceSets ниже).
+            manifestPlaceholders["rustoreProjectId"] = driverRustoreProjectId
+        }
+    }
+    sourceSets {
+        getByName("driver") {
+            manifest.srcFile(if (driverRustoreProjectId.isBlank()) "src/driver/AndroidManifest-nopush.xml" else "src/driver/AndroidManifest.xml")
+        }
     }
 
     // Подпись релизной сборки — ключ и пароли приходят из переменных

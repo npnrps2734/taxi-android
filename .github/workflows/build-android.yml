@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android APK (UMKA Такси + UMKA Водитель)
 
 on:
   push:
@@ -20,14 +20,22 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # Собираются ДВА приложения из одного кода (см. productFlavors в app/build.gradle.kts):
+      # passenger — «UMKA Такси» (ru.taxiapp.app), driver — «UMKA Водитель» (ru.taxiapp.driver).
       - name: Build debug APK
         run: gradle assembleDebug
 
-      - name: Upload debug APK
+      - name: Upload debug APK (UMKA Такси)
         uses: actions/upload-artifact@v4
         with:
-          name: taxi-app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: umka-taxi-debug
+          path: app/build/outputs/apk/passenger/debug/*.apk
+
+      - name: Upload debug APK (UMKA Водитель)
+        uses: actions/upload-artifact@v4
+        with:
+          name: umka-driver-debug
+          path: app/build/outputs/apk/driver/debug/*.apk
 
       # Подписанная релизная сборка — нужна для публикации в RuStore (там не
       # принимают debug-APK). Собирается, только если в секретах репозитория
@@ -49,11 +57,18 @@ jobs:
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
 
-      - name: Upload release APK
+      - name: Upload release APK (UMKA Такси — для RuStore)
         if: ${{ env.HAS_RELEASE_SIGNING == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: taxi-app-release
-          path: app/build/outputs/apk/release/app-release.apk
+          name: umka-taxi-release
+          path: app/build/outputs/apk/passenger/release/*.apk
+
+      - name: Upload release APK (UMKA Водитель — для RuStore)
+        if: ${{ env.HAS_RELEASE_SIGNING == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: umka-driver-release
+          path: app/build/outputs/apk/driver/release/*.apk
     env:
       HAS_RELEASE_SIGNING: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' }}

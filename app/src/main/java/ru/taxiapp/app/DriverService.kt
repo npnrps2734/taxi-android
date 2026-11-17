@@ -175,7 +175,11 @@ class DriverService : Service() {
         @Volatile var authToken: String? = null
         @Volatile var baseUrl: String = "https://umkatax.ru"
 
+        // Служба объявлена только в приложении водителя (src/driver/AndroidManifest.xml)
+        val available: Boolean get() = BuildConfig.APP_KIND == "driver"
+
         fun start(ctx: Context) {
+            if (!available) return
             // На Android 14 тип «геолокация» требует выданного разрешения на местоположение.
             val hasLocation = ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_FINE_LOCATION) ==
                 PackageManager.PERMISSION_GRANTED

@@ -3,16 +3,13 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Тип сети (Wi-Fi / мобильная) — в причине «Сервис недоступен» для журнала -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <!-- Показ push-уведомлений на Android 13+ (см. MainActivity: requestNotificationPermissionIfNeeded) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Работа в фоне, пока водитель на линии (DriverService): служба переднего плана с геолокацией -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Просьба «не ограничивать работу приложения в фоне» (один раз при первом выходе на линию) -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Работа в фоне на линии (служба DriverService) — только в приложении водителя: src/driver/AndroidManifest.xml -->
     <!-- «Позвонить» водителю/пассажиру из приложения (запрашивается при первом нажатии; при отказе открывается набор номера) -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <!-- Телефон не обязателен: приложение можно поставить и на планшет без звонков -->
@@ -56,7 +53,7 @@
         <!-- RuStore Push: ID проекта из RuStore Консоль → Push-уведомления → Проекты, канал — тот же громкий -->
         <meta-data
             android:name="ru.rustore.sdk.pushclient.project_id"
-            android:value="b0p3XL0lkDtR9gG3CpXBc3ohQavojb0W" />
+            android:value="${rustoreProjectId}" />
         <meta-data
             android:name="ru.rustore.sdk.pushclient.default_notification_channel_id"
             android:value="umka_default" />
@@ -69,12 +66,6 @@
                 <action android:name="ru.rustore.sdk.pushclient.MESSAGING_EVENT" />
             </intent-filter>
         </service>
-
-        <!-- Служба «Вы на линии»: держит приложение живым в фоне -->
-        <service
-            android:name=".DriverService"
-            android:exported="false"
-            android:foregroundServiceType="location" />
 
         <!-- Push-уведомления (Firebase Cloud Messaging) — см. FcmService.kt -->
         <service

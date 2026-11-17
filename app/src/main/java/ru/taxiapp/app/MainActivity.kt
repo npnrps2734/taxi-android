@@ -40,6 +40,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import ru.rustore.sdk.pushclient.RuStorePushClient
 
@@ -68,6 +69,10 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val loadTimeoutRunnable = Runnable { onLoadTimeout() }
     private var lastMainUrl: String? = null
+    // Первый сбой загрузки — тихо перезагружаем страницу; «Сервис недоступен» — только если не помогло.
+    private var silentRetryDone = false
+    // Текущая загрузка закончилась ошибкой (onPageFinished приходит и для страницы с ошибкой)
+    private var currentLoadFailed = false
 
     // ---- Выбор файла/фото для <input type="file"> на страницах ----
     // Без onShowFileChooser WebView молча игнорирует нажатие на «Прикрепить фото».
@@ -216,11 +221,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class UmkaBridge {
+        // Какое это приложение: "passenger" — «UMKA Такси», "driver" — «UMKA Водитель».
+        // Страница по нему не пускает водителя в пассажирское приложение и наоборот (common.js: umkaAppKind).
+        @JavascriptInterface
+        fun appKind(): String = BuildConfig.APP_KIND
+
+        // Ссылка на другое приложение UMKA в RuStore («Скачать UMKA Водитель») — открываем снаружи.
+        @JavascriptInterface
+        fun openStore(url: String) {
+            runOnUiThread {
+                if (!isTrustedPage()) return@runOnUiThread
+                if (!url.startsWith("https://www.rustore.ru/") && !url.startsWith("https://apps.rustore.ru/")) return@runOnUiThread
+                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                catch (e: Exception) { Toast.makeText(this@MainActivity, "Не удалось открыть RuStore", Toast.LENGTH_SHORT).show() }
+            }
+        }
+
         // Страница водителя сообщает: вышел на линию (true) / ушёл с линии (false).
         @JavascriptInterface
         fun setOnLine(on: Boolean) {
             runOnUiThread {
                 if (!isTrustedPage()) return@runOnUiThread
+                if (!DriverService.available) return@runOnUiThread
                 lineActive = on
                 if (on) {
                     DriverService.start(this@MainActivity)
@@ -350,6 +372,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 if (url != null && !isOfflineUrl(url)) {
+                    currentLoadFailed = false
                     lastMainUrl = url
                     // Если страница не загрузилась за 30 секунд — сервер, скорее всего, недоступен.
                     mainHandler.removeCallbacks(loadTimeoutRunnable)
@@ -364,7 +387,7 @@ class MainActivity : AppCompatActivity() {
                 if (request?.isForMainFrame != true) return
                 // ERROR_UNSUPPORTED_SCHEME (-10): ссылки банков и т.п. обрабатываются отдельно.
                 if (error?.errorCode == ERROR_UNSUPPORTED_SCHEME_CODE) return
-                showOfflinePage(request?.url?.toString())
+                onMainLoadFailed(request?.url?.toString(), "net:${error?.errorCode ?: 0}", error?.description?.toString() ?: "")
             }
 
             // Сервер ответил, но с ошибкой 5xx (502/503/504 — приложение упало или перегружено).
@@ -372,7 +395,7 @@ class MainActivity : AppCompatActivity() {
                 super.onReceivedHttpError(view, request, errorResponse)
                 if (request?.isForMainFrame != true) return
                 val code = errorResponse?.statusCode ?: return
-                if (code in 500..599) showOfflinePage(request?.url?.toString())
+                if (code in 500..599) onMainLoadFailed(request?.url?.toString(), "http:$code", errorResponse?.reasonPhrase ?: "")
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -380,6 +403,12 @@ class MainActivity : AppCompatActivity() {
                 mainHandler.removeCallbacks(loadTimeoutRunnable)
                 hideSplashOverlay()
                 pageLoaded = true
+                // Страница сервера открылась — связь есть: сбрасываем «тихую» попытку и отправляем
+                // накопленные причины прошлых «Сервис недоступен» (см. rememberLoadFailure).
+                if (url != null && url.startsWith(SERVER_URL) && !currentLoadFailed) {
+                    silentRetryDone = false
+                    sendLoadFailureReports()
+                }
                 pendingFcmToken?.let { deliverFcmTokenToWebView(it) }
                 pendingRustoreToken?.let { deliverRustoreTokenToWebView(it) }
             }
@@ -475,7 +504,7 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (nm.getNotificationChannel("umka_default") != null) return
-        val ch = NotificationChannel("umka_default", "Уведомления UMKA Такси", NotificationManager.IMPORTANCE_HIGH)
+        val ch = NotificationChannel("umka_default", if (BuildConfig.APP_KIND == "driver") "Заказы и уведомления UMKA" else "Уведомления UMKA Такси", NotificationManager.IMPORTANCE_HIGH)
         ch.description = "Новые заказы, статусы поездок, сообщения"
         ch.enableVibration(true)
         ch.lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
@@ -495,7 +524,7 @@ class MainActivity : AppCompatActivity() {
         if (System.currentTimeMillis() - prefs.getLong("update_asked_at", 0L) < 24L * 60 * 60 * 1000) return
         Thread {
             try {
-                val c = URL("$SERVER_URL/api/app/android-version").openConnection() as HttpURLConnection
+                val c = URL("$SERVER_URL/api/app/android-version?app=${BuildConfig.APP_KIND}").openConnection() as HttpURLConnection
                 c.connectTimeout = 6000
                 c.readTimeout = 6000
                 val body = c.inputStream.bufferedReader().use { it.readText() }
@@ -589,7 +618,91 @@ class MainActivity : AppCompatActivity() {
         // Таймаут срабатывает только если страница так и не загрузилась.
         if (isOfflineUrl(webView.url)) return
         if (webView.progress >= 100) return
-        showOfflinePage(lastMainUrl ?: webView.url)
+        onMainLoadFailed(lastMainUrl ?: webView.url, "timeout", "страница не загрузилась за ${LOAD_TIMEOUT_MS / 1000} с")
+    }
+
+    // Сбой загрузки страницы: запоминаем причину; в первый раз тихо пробуем ещё раз,
+    // и только если и это не помогло — показываем «Сервис недоступен».
+    private fun onMainLoadFailed(failedUrl: String?, code: String, desc: String) {
+        currentLoadFailed = true
+        rememberLoadFailure(code, desc, failedUrl)
+        if (!silentRetryDone) {
+            silentRetryDone = true
+            mainHandler.removeCallbacks(loadTimeoutRunnable)
+            val target = failedUrl?.takeIf { it.startsWith(SERVER_URL) } ?: SERVER_URL
+            mainHandler.postDelayed({
+                if (isFinishing || isDestroyed) return@postDelayed
+                webView.stopLoading()
+                webView.loadUrl(target)
+            }, 2000)
+            return
+        }
+        showOfflinePage(failedUrl)
+    }
+
+    // ---- Причины «Сервис недоступен» для журнала на сервере ----
+    // Пока связи нет, отправить их нельзя — копим (до 20 последних) и отправляем, как только
+    // страница сервера снова открылась. В админке они видны в журнале «Уведомления в MAX».
+    private fun rememberLoadFailure(code: String, desc: String, url: String?) {
+        try {
+            val prefs = getSharedPreferences("umka", Context.MODE_PRIVATE)
+            val arr = org.json.JSONArray(prefs.getString("load_failures", "[]"))
+            val o = JSONObject()
+            o.put("at", System.currentTimeMillis())
+            o.put("code", code)
+            o.put("desc", desc.take(200))
+            o.put("url", (url ?: "").take(200))
+            o.put("net", currentNetworkType())
+            arr.put(o)
+            val keep = org.json.JSONArray()
+            for (i in maxOf(0, arr.length() - 20) until arr.length()) keep.put(arr.get(i))
+            prefs.edit().putString("load_failures", keep.toString()).apply()
+        } catch (e: Exception) { /* не критично */ }
+    }
+
+    private fun currentNetworkType(): String = try {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+        when {
+            caps == null -> "нет сети"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "мобильная"
+            else -> "другая"
+        }
+    } catch (e: Exception) { "?" }
+
+    private fun sendLoadFailureReports() {
+        val prefs = getSharedPreferences("umka", Context.MODE_PRIVATE)
+        val saved = prefs.getString("load_failures", "[]") ?: "[]"
+        if (saved == "[]") return
+        Thread {
+            try {
+                val body = JSONObject()
+                body.put("reports", org.json.JSONArray(saved))
+                body.put("app", BuildConfig.APP_KIND)
+                body.put("version", BuildConfig.VERSION_NAME)
+                body.put("device", "${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}")
+                val c = URL("$SERVER_URL/api/app/load-failures").openConnection() as HttpURLConnection
+                c.requestMethod = "POST"
+                c.connectTimeout = 8000
+                c.readTimeout = 8000
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", "application/json")
+                c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                val ok = c.responseCode in 200..299
+                c.disconnect()
+                // Удаляем только отправленное (за это время могли добавиться новые сбои)
+                if (ok) {
+                    val sent = org.json.JSONArray(saved)
+                    var lastSent = 0L
+                    for (i in 0 until sent.length()) lastSent = maxOf(lastSent, sent.getJSONObject(i).optLong("at"))
+                    val now = org.json.JSONArray(prefs.getString("load_failures", "[]"))
+                    val rest = org.json.JSONArray()
+                    for (i in 0 until now.length()) if (now.getJSONObject(i).optLong("at") > lastSent) rest.put(now.get(i))
+                    prefs.edit().putString("load_failures", rest.toString()).apply()
+                }
+            } catch (e: Exception) { /* отправим в следующий раз */ }
+        }.start()
     }
 
     private fun showOfflinePage(failedUrl: String?) {
@@ -638,6 +751,9 @@ class MainActivity : AppCompatActivity() {
     // Текущий токен устройства — может быть уже известен из прошлого запуска
     // (Firebase кэширует его сам), а может понадобиться сгенерировать заново.
     private fun fetchFcmToken() {
+        // В «UMKA Водитель» Google-push работает, только когда приложение добавлено в Firebase
+        // (app/google-services.json) — до этого Firebase не инициализирован, пропускаем.
+        if (FirebaseApp.getApps(this).isEmpty()) return
         FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
             if (task.isSuccessful) {
                 val token = task.result
