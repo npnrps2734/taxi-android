@@ -17,8 +17,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Версия Gradle закреплена (как в gradle/wrapper): самая новая (9.x) не работает
+      # с Android Gradle Plugin 8.5 и роняет сборку на поиске зависимостей.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
 
       # Собираются ДВА приложения из одного кода (см. productFlavors в app/build.gradle.kts):
       # passenger — «UMKA Такси» (ru.taxiapp.app), driver — «UMKA Водитель» (ru.taxiapp.driver).
