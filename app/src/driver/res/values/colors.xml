@@ -1,0 +1,4 @@
+<resources>
+    <!-- Заставка «UMKA Водитель»: цвет фона под картинку медведя за рулём (splash_logo.png) -->
+    <color name="splash_background">#13141A</color>
+</resources>
