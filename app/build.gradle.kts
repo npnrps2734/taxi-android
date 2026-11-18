@@ -53,8 +53,8 @@ android {
         create("driver") {
             dimension = "app"
             applicationId = "ru.taxiapp.driver"
-            versionCode = 2
-            versionName = "1.0.1"
+            versionCode = 3
+            versionName = "1.0.2"
             resValue("string", "app_name", "UMKA Водитель")
             buildConfigField("String", "APP_KIND", "\"driver\"")
             // ID проекта RuStore Push приложения водителя — gradle.properties (RUSTORE_DRIVER_PROJECT_ID).

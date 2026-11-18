@@ -1,0 +1,8 @@
+<resources>
+    <!-- Android 12+: системную заставку отключить нельзя — делаем её незаметной: тот же фон, без значка -->
+    <style name="Theme.TaxiApp.Splash" parent="Theme.TaxiApp">
+        <item name="android:windowBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_empty</item>
+    </style>
+</resources>

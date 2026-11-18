@@ -1,0 +1,8 @@
+<resources>
+    <!-- «UMKA Водитель»: одна заставка. Пока приложение запускается — ровный фон цвета заставки,
+         затем сразу картинка (splashOverlay в activity_main.xml). Картинку в окне не рисуем,
+         чтобы она не показывалась дважды разного размера. -->
+    <style name="Theme.TaxiApp.Splash" parent="Theme.TaxiApp">
+        <item name="android:windowBackground">@color/splash_background</item>
+    </style>
+</resources>
