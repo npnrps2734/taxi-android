@@ -48,15 +48,18 @@ android {
             versionName = "1.3"
             resValue("string", "app_name", "UMKA Такси")
             buildConfigField("String", "APP_KIND", "\"passenger\"")
+            buildConfigField("long", "MIN_SPLASH_MS", "0L")
             manifestPlaceholders["rustoreProjectId"] = "b0p3XL0lkDtR9gG3CpXBc3ohQavojb0W"
         }
         create("driver") {
             dimension = "app"
             applicationId = "ru.taxiapp.driver"
-            versionCode = 3
-            versionName = "1.0.2"
+            versionCode = 4
+            versionName = "1.0.3"
             resValue("string", "app_name", "UMKA Водитель")
             buildConfigField("String", "APP_KIND", "\"driver\"")
+            // Сколько минимум показывать заставку (мс) — медведь за рулём
+            buildConfigField("long", "MIN_SPLASH_MS", "2500L")
             // ID проекта RuStore Push приложения водителя — gradle.properties (RUSTORE_DRIVER_PROJECT_ID).
             // Пока пусто — RuStore Push в приложении водителя не подключается (см. sourceSets ниже).
             manifestPlaceholders["rustoreProjectId"] = driverRustoreProjectId

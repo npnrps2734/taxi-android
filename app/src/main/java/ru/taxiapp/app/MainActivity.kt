@@ -348,7 +348,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
+    // Когда показали заставку — чтобы держать её не меньше BuildConfig.MIN_SPLASH_MS
+    private var splashShownAt = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        splashShownAt = android.os.SystemClock.uptimeMillis()
         // Тема запуска (Theme.TaxiApp.Splash, с логотипом UMKA) уже показана системой
         // на самом старте; здесь сразу переключаемся на обычную тему приложения.
         setTheme(R.style.Theme_TaxiApp)
@@ -714,8 +718,17 @@ class MainActivity : AppCompatActivity() {
         hideSplashOverlay()
     }
 
+    // Заставка держится не меньше BuildConfig.MIN_SPLASH_MS (у «UMKA Водитель» — 2,5 с,
+    // у «UMKA Такси» — 0: убираем сразу, как загрузилась страница) и плавно исчезает.
     private fun hideSplashOverlay() {
-        findViewById<View>(R.id.splashOverlay)?.visibility = View.GONE
+        val v = findViewById<View>(R.id.splashOverlay) ?: return
+        if (v.visibility == View.GONE) return
+        val left = BuildConfig.MIN_SPLASH_MS - (android.os.SystemClock.uptimeMillis() - splashShownAt)
+        if (left > 0) {
+            mainHandler.postDelayed({ hideSplashOverlay() }, left)
+            return
+        }
+        v.animate().alpha(0f).setDuration(250).withEndAction { v.visibility = View.GONE }.start()
     }
 
     private fun hasLocationPermission(): Boolean =
